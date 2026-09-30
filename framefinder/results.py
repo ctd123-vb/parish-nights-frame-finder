@@ -8,7 +8,7 @@ RESULT_COLUMNS = [
     "id", "video", "file", "t", "timestamp", "final_score", "local_score", "review_avg",
     *REVIEW_FIELDS, "tags", "room_sparse", "best_crop", "review_note",
     "n_clear", "face_frac", "face_sharpness", "min_sharpness", "smile", "eyes_open",
-    "face_luma", "clipped", "width", "height", "decision",
+    "face_luma", "clipped", "width", "height", "backup", "decision",
 ]
 
 

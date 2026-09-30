@@ -91,7 +91,7 @@ function render() {
   const k = all.filter(i => i.decision === "keep").length, j = all.filter(i => i.decision === "reject").length;
   document.getElementById("counts").innerHTML = `<b>${all.length}</b> frames &middot; <b>${k}</b> kept &middot; <b>${j}</b> rejected &middot; <b>${all.length-k-j}</b> left`;
   const strip = document.getElementById("strip");
-  strip.innerHTML = view.map((it, i) => `<div class="${i===cur?"cur":""} ${it.decision}" data-i="${i}"><img loading="lazy" src="/thumb/${encodeURI(it.id)}"><small>${it.final_score}</small></div>`).join("");
+  strip.innerHTML = view.map((it, i) => `<div class="${i===cur?"cur":""} ${it.decision}" data-i="${i}"><img loading="lazy" src="/thumb/${encodeURI(it.id)}"><small>${it.backup ? "Backup · " : ""}${it.final_score}</small></div>`).join("");
   const it = view[cur];
   const img = document.getElementById("img"), info = document.getElementById("info"), stamp = document.getElementById("stamp");
   if (!it) { img.removeAttribute("src"); stamp.className = "stamp"; info.innerHTML = `<div class="empty">Nothing here.</div>`; document.getElementById("nav").textContent = ""; return; }
@@ -106,6 +106,7 @@ function render() {
     <div class="sub">local ${it.local_score}${it.review_avg !== "" ? ` &middot; review ${it.review_avg}/10` : ""} &middot; ${esc(it.video)} @ ${esc(it.timestamp)}</div>
     <div class="tags">${tags}</div>
     ${String(it.room_sparse).toLowerCase() === "true" ? `<div class="flag">Room looks sparse</div>` : ""}
+    ${it.backup ? `<div class="flag">Backup pick: ${esc(it.backup)}</div>` : ""}
     ${it.best_crop ? `<div class="sub">Best crop: ${esc(it.best_crop)}</div>` : ""}
     ${rows ? `<table>${rows}</table>` : ""}
     ${it.review_note ? `<p class="note">${esc(it.review_note)}</p>` : ""}

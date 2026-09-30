@@ -407,6 +407,12 @@ function localScore(f) {
   const expo = Math.max(0, 1 - Math.abs(f.faceLuma - 140) / 110) * (1 - Math.min(1, f.clipped * 3));
   return +(100 * (0.25 * sharp + 0.20 * size + 0.20 * smile + 0.15 * expo + 0.10 * eyes + 0.10 * count)).toFixed(1);
 }
+// Frames with no usable face still get a low score (sharpness + exposure of the whole frame),
+// so they can fill in as backups when too few frames pass. Capped at 40 so they rank below face frames.
+function fallbackScore(f) {
+  const expo = Math.max(0, 1 - Math.abs(f.frameLuma - 120) / 110) * (1 - Math.min(1, f.clipped * 3));
+  return +(40 * (0.6 * Math.min(1, f.frameSharp / (TH.minSharp * 3)) + 0.4 * expo)).toFixed(1);
+}
 function scoreFrame(full, t) {
   const W = full.width, H = full.height;
   const f = { t, W, H, nFaces: 0, nClear: 0, faceFrac: 0, sharp: 0, minSharp: 0, smile: -1, eyes: -1, faceLuma: 0, frameLuma: 0, clipped: 0, fail: "", faces: [] };
@@ -414,11 +420,12 @@ function scoreFrame(full, t) {
   let sum = 0, clip = 0; for (const v of sg) { sum += v; if (v >= 250) clip++; }
   f.frameLuma = sum / sg.length; f.clipped = clip / sg.length;
   f.hash = dhash(full);
+  f.frameSharp = sharpness(full, W * 0.2, H * 0.2, W * 0.6, H * 0.6);
   const faces = detectFaces(full); f.nFaces = faces.length;
   const minPx = Math.max(TH.minFacePx, TH.minFaceFrac * Math.min(W, H));
   const clear = faces.filter(b => b.h >= minPx).sort((a, b) => b.w * b.h - a.w * a.h);
   f.nClear = clear.length;
-  if (!clear.length) { f.fail = "no_clear_face"; return f; }
+  if (!clear.length) { f.fail = "no_clear_face"; f.local = fallbackScore(f); return f; }
   const main = clear.filter(b => b.w * b.h >= 0.4 * clear[0].w * clear[0].h).slice(0, 4);
   f.faces = main; f.faceFrac = main[0].h / H;
   let aw = 0, sh = 0, lu = 0, mins = Infinity; const blinks = [], smiles = [];
@@ -430,7 +437,7 @@ function scoreFrame(full, t) {
     const a = w * h; aw += a; sh += s * a; lu += m * a; mins = Math.min(mins, s);
     const at = faceAttrs(full, b); if (at) { blinks.push(at.blink); smiles.push(at.smile); }
   }
-  if (!aw) { f.fail = "no_clear_face"; return f; }
+  if (!aw) { f.fail = "no_clear_face"; f.local = fallbackScore(f); return f; }
   f.sharp = sh / aw; f.minSharp = mins; f.faceLuma = lu / aw;
   if (blinks.length) { f.eyes = 1 - Math.max(...blinks); f.smile = smiles.reduce((p, c) => p + c, 0) / smiles.length; }
   if (f.faceLuma < TH.minFaceLuma || f.faceLuma > TH.maxFaceLuma || f.clipped > TH.maxClipped || f.frameLuma < TH.minFrameLuma) f.fail = "bad_exposure";
@@ -459,6 +466,27 @@ function pickShortlist(best, n) {
   for (const f of [...best].sort((a, b) => b.local - a.local)) {
     if (out.every(o => !nearDup(f, o, 30) && Math.abs(f.t - o.t) >= 1.0)) out.push(f);
     if (out.length === n) break;
+  }
+  return out;
+}
+// Every video returns at least MIN_FRAMES. If too few frames pass every filter, add the next best:
+// first near-duplicates of passing frames, then face frames that failed a filter, then frames with
+// no clear face. Spacing rules relax step by step so the minimum is always met.
+const MIN_FRAMES = 5;
+const BACKUP_REASON = { "": "similar to another pick", no_clear_face: "no clear face", bad_exposure: "too dark or too bright",
+  blurry_face: "blurry face", eyes_closed: "eyes closed" };
+function fillShortlist(short, frames, min) {
+  if (short.length >= min) return short;
+  const out = [...short];
+  const tier = f => (!f.fail ? 0 : f.nClear > 0 ? 1 : 2);
+  const pool = frames.filter(f => !out.includes(f)).sort((a, b) => tier(a) - tier(b) || b.local - a.local);
+  for (const [dist, gap] of [[30, 2.0], [30, 1.0], [15, 0.5], [-1, 0]]) {
+    for (const f of pool) {
+      if (out.length >= min) break;
+      if (out.includes(f)) continue;
+      const ok = out.every(o => dist < 0 ? o.t !== f.t : !nearDup(f, o, dist) && Math.abs(f.t - o.t) >= gap);
+      if (ok) { f.backup = BACKUP_REASON[f.fail] ?? "extra"; out.push(f); }
+    }
   }
   return out;
 }
@@ -513,7 +541,8 @@ async function processFile(file, idx, total) {
   }
   const passed = frames.filter(f => !f.fail);
   const moments = groupMoments(passed), best = moments.map(g => g.reduce((a, b) => (b.local > a.local ? b : a)));
-  const short = pickShortlist(best, topN);
+  const short = fillShortlist(pickShortlist(best, topN), frames, Math.min(MIN_FRAMES, topN));
+  const nBackup = short.filter(f => f.backup).length;
   $("status").textContent = "Saving full-resolution finalists...";
   const name = file.name.replace(/\.[^.]+$/, "");
   for (const f of short) {
@@ -529,8 +558,12 @@ async function processFile(file, idx, total) {
   let left = frames.length; const funnel = [["Extracted", left]];
   for (const [k, label] of order.map((k, i) => [k, ["Has a clear face", "Exposure OK", "Face sharp", "Eyes open"][i]])) {
     left -= frames.filter(f => f.fail === k).length; funnel.push([label, left]); }
-  funnel.push(["Unique moments", moments.length], ["Shortlisted", short.length]);
-  allStats.push({ video: file.name, funnel, notes: notesFor(info, frames, dur), stopped: stopFlag });
+  funnel.push(["Unique moments", moments.length], ["Passed, shortlisted", short.length - nBackup]);
+  if (nBackup) funnel.push(["Backups added", nBackup]);
+  const notes = notesFor(info, frames, dur);
+  const nPass = short.length - nBackup, picks = `${nBackup} backup pick${nBackup === 1 ? " was" : "s were"} added to reach ${short.length}`;
+  if (nBackup) notes.unshift(`${nPass ? `Only ${nPass} frame${nPass === 1 ? "" : "s"} passed` : "No frames passed"} every filter, so ${picks}. Each backup is marked with the reason it missed.`);
+  allStats.push({ video: file.name, funnel, notes, stopped: stopFlag });
   return short;
 }
 
@@ -546,7 +579,8 @@ function showResults() {
 // ---------- scoring with Claude ----------
 const finalScore = it => it.rev ? +(0.35 * it.local + 0.65 * avg(it.rev) * 10).toFixed(1) : it.local;
 const avg = r => REVIEW.reduce((s, [k]) => s + (+r[k] || 0), 0) / REVIEW.length;
-const sortItems = () => items.sort((a, b) => (!!b.rev - !!a.rev) || finalScore(b) - finalScore(a));
+// Claude-scored frames first; among unscored ones, backups go last; then by score.
+const sortItems = () => items.sort((a, b) => (!!b.rev - !!a.rev) || (!a.rev && !b.rev ? !!a.backup - !!b.backup : 0) || finalScore(b) - finalScore(a));
 const PROMPT = n => `You are reviewing ${n} still frame(s) pulled from a video of Parish Nights, a country swing dance night for young adults. The photo library feeds Instagram posts, Meta ads, and digital flyers. The images are frames 1 to ${n}, in order.
 
 Score each frame 1-10 (10 = best) on:
@@ -605,7 +639,7 @@ function render() {
   const k = items.filter(i => i.decision === "keep").length, j = items.filter(i => i.decision === "reject").length;
   $("galTitle").textContent = `Shortlist · ${items.length} frames`;
   $("tally").textContent = `${k} kept · ${j} rejected · ${items.length - k - j} left`;
-  $("strip").innerHTML = items.map((it, i) => `<button type="button" class="${i === cur ? "cur" : ""} ${it.decision}" data-i="${i}" aria-label="Frame ${i + 1}"><img src="${it.url}" alt=""><small>${finalScore(it)}</small></button>`).join("");
+  $("strip").innerHTML = items.map((it, i) => `<button type="button" class="${i === cur ? "cur" : ""} ${it.decision}" data-i="${i}" aria-label="Frame ${i + 1}"><img src="${it.url}" alt=""><small>${it.backup ? "Backup · " : ""}${finalScore(it)}</small></button>`).join("");
   const it = items[cur];
   if (!it) { $("side").innerHTML = `<div class="empty"><strong>No frames made the shortlist.</strong><span>Every frame failed a filter. Check the notes above for why.</span></div>`; $("big").removeAttribute("src"); $("nav").textContent = ""; return; }
   $("big").src = it.url; $("nav").textContent = `${cur + 1} / ${items.length}`;
@@ -617,6 +651,7 @@ function render() {
     <div class="sub">${r ? `review ${avg(r).toFixed(1)}/10 · ` : ""}local ${it.local} · ${esc(it.video)} @ ${fmtT(it.t)}</div></div>
     <div class="tags">${r ? (r.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join("") : `<span class="tag">not scored by Claude yet</span>`}</div>
     ${r && (r.room_sparse === true || r.room_sparse === "true") ? `<div class="flag">Room looks sparse</div>` : ""}
+    ${it.backup ? `<div class="flag">Backup pick: ${esc(it.backup)}</div>` : ""}
     ${r?.best_crop ? `<div class="sub">Best crop: ${esc(r.best_crop)}</div>` : ""}
     ${rows ? `<table class="kv">${rows}</table>` : ""}
     ${r?.note ? `<p class="note">${esc(r.note)}</p>` : ""}
@@ -667,11 +702,11 @@ $("zip").onclick = async () => {
 };
 function csv(list) {
   const cols = ["file", "video", "timestamp", "final_score", "local_score", "review_avg", ...REVIEW.map(r => r[0]), "tags", "room_sparse", "best_crop", "note",
-    "faces", "face_sharpness", "smile", "eyes_open", "face_brightness", "width", "height", "decision"];
+    "faces", "face_sharpness", "smile", "eyes_open", "face_brightness", "width", "height", "backup_reason", "decision"];
   const q = v => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const rows = list.map(it => [it.name, it.video, fmtT(it.t), finalScore(it), it.local, it.rev ? avg(it.rev).toFixed(2) : "",
     ...REVIEW.map(([k]) => it.rev?.[k] ?? ""), (it.rev?.tags || []).join("|"), it.rev?.room_sparse ?? "", it.rev?.best_crop ?? "", it.rev?.note ?? "",
-    it.nClear, it.sharp.toFixed(1), it.smile.toFixed(3), it.eyes.toFixed(3), it.faceLuma.toFixed(1), it.W, it.H, it.decision]);
+    it.nClear, it.sharp.toFixed(1), it.smile.toFixed(3), it.eyes.toFixed(3), it.faceLuma.toFixed(1), it.W, it.H, it.backup ?? "", it.decision]);
   return [cols, ...rows].map(r => r.map(q).join(",")).join("\n");
 }
 $("csv").onclick = () => save("parish-nights-scores.csv", csv(items));

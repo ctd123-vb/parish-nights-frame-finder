@@ -41,7 +41,8 @@ Keep copies the full-res frame to `keepers/`. Reject moves it to `output/<video>
    - exposure: face brightness, frame brightness, blown-out area
 4. Drops frames in this order: no clear face, bad exposure, blurry face, eyes closed.
 5. Groups near-duplicates into "moments" (image hash + face layout) and keeps the best of each.
-6. Shortlists the top 15, at least 1 second apart.
+6. Shortlists the top 15, at least 1 second apart. Every video returns at least 5: if fewer pass,
+   the next-best frames are added as backups, labeled with the filter they missed.
 
 ## Output
 

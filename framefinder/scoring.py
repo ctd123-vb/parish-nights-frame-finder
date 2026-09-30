@@ -45,6 +45,8 @@ class FrameScore:
     local_score: float = 0.0
     fail: str = ""                 # first filter that rejected this frame, "" if it passed
     dhash: str = ""
+    frame_sharpness: float = 0.0   # whole-frame (center) sharpness, used to rank backups
+    backup: str = ""               # why a backup pick missed the filters, "" for normal picks
     faces: list = field(default_factory=list)   # [x, y, w, h] boxes of main faces (full res)
 
     def row(self) -> dict:
@@ -181,6 +183,7 @@ class Scorer:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         fs.dhash = dhash(gray)
+        fs.frame_sharpness = round(sharpness(gray[int(H * 0.2):int(H * 0.8), int(W * 0.2):int(W * 0.8)]), 1)
 
         g_small = cv2.resize(gray, (480, int(480 * H / W)), interpolation=cv2.INTER_AREA)
         fs.frame_luma = float(g_small.mean())
@@ -194,6 +197,7 @@ class Scorer:
         fs.n_clear = len(clear)
         if not clear:
             fs.fail = "no_clear_face"
+            fs.local_score = fallback_score(fs, th)
             return fs
 
         # "main" faces: the largest, plus any at least 40% of its area (skips tiny background faces)
@@ -213,6 +217,7 @@ class Scorer:
                 blinks.append(a[0]); smiles.append(a[1])
         if not sharp:
             fs.fail = "no_clear_face"
+            fs.local_score = fallback_score(fs, th)
             return fs
         areas = np.array(areas)
         fs.face_sharpness = round(float(np.average(sharp, weights=areas)), 1)
@@ -279,6 +284,39 @@ def group_moments(frames: list[FrameScore], max_dist: int = 40, max_gap: float =
                 continue
         groups.append([f])
     return groups
+
+
+def fallback_score(fs: FrameScore, th: Thresholds) -> float:
+    """Score for a frame with no usable face (whole-frame sharpness + exposure), capped at 40
+    so these only fill in as backups, below any frame with a face."""
+    expo = max(0.0, 1 - abs(fs.frame_luma - 120) / 110) * (1 - min(1.0, fs.clipped * 3))
+    return round(40 * (0.6 * min(1.0, fs.frame_sharpness / (th.min_sharpness * 3)) + 0.4 * expo), 1)
+
+
+MIN_FRAMES = 5
+BACKUP_REASON = {"": "similar to another pick", "no_clear_face": "no clear face",
+                 "bad_exposure": "too dark or too bright", "blurry_face": "blurry face", "eyes_closed": "eyes closed"}
+
+
+def fill_shortlist(shortlist: list[FrameScore], frames: list[FrameScore], n: int = MIN_FRAMES) -> list[FrameScore]:
+    """Every video returns at least n frames. If too few passed, add the next best: near-duplicates
+    of passing frames, then face frames that failed a filter, then frames with no clear face.
+    Spacing rules relax step by step so the minimum is always met."""
+    if len(shortlist) >= n:
+        return shortlist
+    out = list(shortlist)
+    tier = lambda f: 0 if not f.fail else 1 if f.n_clear > 0 else 2
+    pool = sorted((f for f in frames if f not in out and f.fail != "unreadable"), key=lambda f: (tier(f), -f.local_score))
+    for dist, gap in [(30, 2.0), (30, 1.0), (15, 0.5), (-1, 0.0)]:
+        for f in pool:
+            if len(out) >= n:
+                break
+            if f in out:
+                continue
+            if all(o.t != f.t if dist < 0 else not near_duplicate(f, o, dist) and abs(f.t - o.t) >= gap for o in out):
+                f.backup = BACKUP_REASON.get(f.fail, "extra")
+                out.append(f)
+    return out
 
 
 def pick_shortlist(best_per_moment: list[FrameScore], n: int = 15, min_dist: int = 30,

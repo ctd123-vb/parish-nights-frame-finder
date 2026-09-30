@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 
 from framefinder.results import build_results, write_csv
-from framefinder.scoring import FrameScore, Scorer, Thresholds, group_moments, pick_shortlist
+from framefinder.scoring import MIN_FRAMES, FrameScore, Scorer, Thresholds, fill_shortlist, group_moments, pick_shortlist
 from framefinder.video import extract_frames, frame_time, list_videos, probe
 
 _scorer = None
@@ -65,6 +65,14 @@ def funnel(scores: list[FrameScore]) -> dict:
         out[label] = left
     out["unreadable"] = sum(s.fail == "unreadable" for s in scores)
     return out
+
+
+def backup_note(n_pass: int, n_backup: int) -> list[str]:
+    if not n_backup:
+        return []
+    passed = f"Only {n_pass} frame{'' if n_pass == 1 else 's'} passed" if n_pass else "No frames passed"
+    return [f"{passed} every filter, so {n_backup} backup pick{' was' if n_backup == 1 else 's were'} added to reach "
+            f"{n_pass + n_backup}. See the backup column for why each one missed."]
 
 
 def quality_notes(specs, scores: list[FrameScore], th: Thresholds) -> list[str]:
@@ -133,7 +141,8 @@ def process_video(path: Path, out_root: Path, args, th: Thresholds) -> dict | No
     passed = [s for s in scores if not s.fail]
     moments = group_moments(passed)
     best = [max(g, key=lambda s: s.local_score) for g in moments]
-    shortlist = pick_shortlist(best, n=args.top)
+    shortlist = fill_shortlist(pick_shortlist(best, n=args.top), scores, n=min(MIN_FRAMES, args.top))
+    n_backup = sum(bool(s.backup) for s in shortlist)
 
     for d in ("shortlist", "thumbs"):
         if (vdir / d).exists():
@@ -149,10 +158,11 @@ def process_video(path: Path, out_root: Path, args, th: Thresholds) -> dict | No
 
     counts = funnel(scores)
     counts["moments"] = len(moments)
-    counts["shortlisted"] = len(shortlist)
+    counts["shortlisted"] = len(shortlist) - n_backup
+    counts["backups_added"] = n_backup
     report = {
         "video": path.name, "specs": specs.to_dict(), "counts": counts,
-        "notes": quality_notes(specs, scores, th), "thresholds": asdict(th),
+        "notes": backup_note(len(shortlist) - n_backup, n_backup) + quality_notes(specs, scores, th), "thresholds": asdict(th),
         "seconds": round(time.time() - t0, 1),
     }
     (vdir / "report.json").write_text(json.dumps(report, indent=2))
@@ -207,7 +217,7 @@ def main():
                         "hdr": sp["hdr_format"] or "SDR", **r["counts"], "notes": " | ".join(r["notes"])})
 
     cols = ["video", "resolution", "fps", "hdr", "extracted", "has_clear_face", "exposure_ok", "face_sharp",
-            "eyes_open", "moments", "shortlisted", "notes", "error"]
+            "eyes_open", "moments", "shortlisted", "backups_added", "notes", "error"]
     write_csv(args.output / "summary.csv", summary, cols)
     rows = build_results(args.output)
     print(f"\nWrote {args.output}/summary.csv and {args.output}/results.csv ({len(rows)} shortlisted frames)")
