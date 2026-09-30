@@ -87,3 +87,12 @@ use the local score only and sort after reviewed ones.
 
 Other thresholds (min face size, blink cutoff, exposure limits) are in `framefinder/scoring.py`
 (`Thresholds`).
+
+## Browser version
+
+`web/frame-finder.html` is the same pipeline as a single web page, published as a Claude artifact:
+pick a video, it scans in the browser (nothing uploads), Claude scores the shortlist, press K/J,
+download keepers as a zip. It needs these files next to it when published: `lib/jszip.min.js`
+(npm `jszip`), `mp/vision_bundle.mjs` + `mp/vision_wasm_internal.{js,wasm}` (npm
+`@mediapipe/tasks-vision`), and `mp/models.js` (the two files in `models/`, base64-encoded as
+`self.PN_MODELS = {det, lm}`).
