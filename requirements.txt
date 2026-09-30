@@ -1,0 +1,5 @@
+opencv-python-headless>=4.9
+mediapipe>=0.10.14
+numpy>=1.26
+# Optional: only needed for `python review.py ai` (automated review with Claude)
+anthropic>=0.40

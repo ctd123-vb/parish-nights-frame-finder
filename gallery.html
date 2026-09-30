@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parish Nights Frame Picker</title>
+<style>
+  :root {
+    --bg: #14110f; --panel: #1f1a17; --line: #342c27; --text: #f3ece6; --muted: #a89c92;
+    --accent: #e0a458; --keep: #4caf7a; --reject: #d9534f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
+  header { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; color: var(--accent); }
+  .counts { color: var(--muted); }
+  .counts b { color: var(--text); }
+  .filters button { background: none; border: 1px solid var(--line); color: var(--muted); padding: 4px 10px; border-radius: 999px; cursor: pointer; }
+  .filters button.on { border-color: var(--accent); color: var(--text); }
+  .keys { margin-left: auto; color: var(--muted); font-size: 12px; }
+  kbd { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 11px; }
+  main { display: grid; grid-template-columns: 1fr 320px; gap: 16px; padding: 16px; height: calc(100vh - 170px); min-height: 360px; }
+  .viewer { position: relative; display: flex; align-items: center; justify-content: center; background: #000; border-radius: 8px; overflow: hidden; }
+  .viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .viewer .stamp { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 6px; font-weight: 700; display: none; }
+  .viewer .stamp.keep { display: block; background: var(--keep); }
+  .viewer .stamp.reject { display: block; background: var(--reject); }
+  .viewer .nav { position: absolute; bottom: 12px; right: 12px; color: var(--muted); background: #000a; padding: 2px 8px; border-radius: 6px; }
+  aside { background: var(--panel); border-radius: 8px; padding: 16px; overflow-y: auto; }
+  .score { font-size: 40px; font-weight: 700; color: var(--accent); line-height: 1; }
+  .sub { color: var(--muted); margin: 4px 0 14px; }
+  .tags span { display: inline-block; background: var(--line); border-radius: 999px; padding: 2px 10px; margin: 0 4px 4px 0; font-size: 12px; }
+  .flag { color: var(--reject); font-weight: 600; margin: 6px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  td { padding: 3px 0; border-bottom: 1px solid var(--line); }
+  td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { display: inline-block; height: 6px; background: var(--accent); border-radius: 3px; vertical-align: middle; margin-right: 6px; }
+  .note { color: var(--muted); font-style: italic; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; }
+  .actions button { flex: 1; padding: 10px; border: 0; border-radius: 6px; font-weight: 700; cursor: pointer; color: #fff; }
+  .actions .k { background: var(--keep); } .actions .j { background: var(--reject); } .actions .u { background: var(--line); }
+  .strip { display: flex; gap: 6px; overflow-x: auto; padding: 0 16px 16px; }
+  .strip div { position: relative; flex: 0 0 auto; cursor: pointer; border: 2px solid transparent; border-radius: 6px; }
+  .strip div.cur { border-color: var(--accent); }
+  .strip img { height: 96px; display: block; border-radius: 4px; }
+  .strip div.keep img { outline: 3px solid var(--keep); outline-offset: -3px; }
+  .strip div.reject img { opacity: .3; }
+  .strip small { position: absolute; bottom: 3px; left: 4px; background: #000b; padding: 0 4px; border-radius: 3px; font-size: 11px; }
+  .empty { padding: 40px; color: var(--muted); }
+  @media (max-width: 800px) {
+    main { grid-template-columns: 1fr; height: auto; }
+    .viewer { height: 60vh; }
+    .keys { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Parish Nights Frame Picker</h1>
+  <div class="counts" id="counts"></div>
+  <div class="filters" id="filters">
+    <button data-f="all" class="on">All</button>
+    <button data-f="open">Undecided</button>
+    <button data-f="keep">Kept</button>
+    <button data-f="reject">Rejected</button>
+  </div>
+  <div class="keys"><kbd>K</kbd> keep &nbsp;<kbd>J</kbd> reject &nbsp;<kbd>U</kbd> undo &nbsp;<kbd>&larr;</kbd><kbd>&rarr;</kbd> move &nbsp;<kbd>F</kbd> full res</div>
+</header>
+<main>
+  <div class="viewer"><img id="img" alt=""><div class="stamp" id="stamp"></div><div class="nav" id="nav"></div></div>
+  <aside id="info"></aside>
+</main>
+<div class="strip" id="strip"></div>
+<script>
+const REVIEW = [["sharp_faces","Sharp, flattering faces"],["real_smiles","Real smiles"],["energy","Energy"],
+  ["young_fun","Young and fun"],["room_full","Room looks full"],["headline_space","Headline space"],["crop_fit","4:5 / 9:16 crop"]];
+let all = [], view = [], cur = 0, filter = "all", keepersDir = "";
+
+async function load() {
+  const r = await fetch("/api/items"); const d = await r.json();
+  all = d.items; keepersDir = d.keepers; applyFilter();
+}
+function applyFilter() {
+  const id = view[cur] && view[cur].id;
+  view = all.filter(it => filter === "all" || (filter === "open" ? !it.decision : it.decision === filter));
+  const i = view.findIndex(it => it.id === id); cur = i >= 0 ? i : Math.min(cur, Math.max(0, view.length - 1));
+  render();
+}
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function render() {
+  const k = all.filter(i => i.decision === "keep").length, j = all.filter(i => i.decision === "reject").length;
+  document.getElementById("counts").innerHTML = `<b>${all.length}</b> frames &middot; <b>${k}</b> kept &middot; <b>${j}</b> rejected &middot; <b>${all.length-k-j}</b> left`;
+  const strip = document.getElementById("strip");
+  strip.innerHTML = view.map((it, i) => `<div class="${i===cur?"cur":""} ${it.decision}" data-i="${i}"><img loading="lazy" src="/thumb/${encodeURI(it.id)}"><small>${it.final_score}</small></div>`).join("");
+  const it = view[cur];
+  const img = document.getElementById("img"), info = document.getElementById("info"), stamp = document.getElementById("stamp");
+  if (!it) { img.removeAttribute("src"); stamp.className = "stamp"; info.innerHTML = `<div class="empty">Nothing here.</div>`; document.getElementById("nav").textContent = ""; return; }
+  img.src = "/thumb/" + encodeURI(it.id);
+  stamp.className = "stamp " + (it.decision || ""); stamp.textContent = it.decision === "keep" ? "KEPT" : it.decision === "reject" ? "REJECTED" : "";
+  document.getElementById("nav").textContent = `${cur+1} / ${view.length}`;
+  const tags = it.tags ? it.tags.split("|").map(t => `<span>${esc(t)}</span>`).join("") : `<span>not reviewed</span>`;
+  const rows = REVIEW.map(([key, label]) => it[key] !== "" && it[key] != null
+      ? `<tr><td>${label}</td><td><span class="bar" style="width:${it[key]*6}px"></span>${it[key]}</td></tr>` : "").join("");
+  info.innerHTML = `
+    <div class="score">${it.final_score}</div>
+    <div class="sub">local ${it.local_score}${it.review_avg !== "" ? ` &middot; review ${it.review_avg}/10` : ""} &middot; ${esc(it.video)} @ ${esc(it.timestamp)}</div>
+    <div class="tags">${tags}</div>
+    ${String(it.room_sparse).toLowerCase() === "true" ? `<div class="flag">Room looks sparse</div>` : ""}
+    ${it.best_crop ? `<div class="sub">Best crop: ${esc(it.best_crop)}</div>` : ""}
+    ${rows ? `<table>${rows}</table>` : ""}
+    ${it.review_note ? `<p class="note">${esc(it.review_note)}</p>` : ""}
+    <table>
+      <tr><td>Faces</td><td>${it.n_clear}</td></tr>
+      <tr><td>Face sharpness</td><td>${it.face_sharpness}</td></tr>
+      <tr><td>Smile (model)</td><td>${Number(it.smile) >= 0 ? Math.round(it.smile*100)+"%" : "?"}</td></tr>
+      <tr><td>Eyes open (model)</td><td>${Number(it.eyes_open) >= 0 ? Math.round(it.eyes_open*100)+"%" : "?"}</td></tr>
+      <tr><td>Size</td><td>${it.width}&times;${it.height}</td></tr>
+    </table>
+    <div class="actions"><button class="k" data-d="keep">Keep (K)</button><button class="j" data-d="reject">Reject (J)</button><button class="u" data-d="undo">Undo</button></div>
+    <p class="sub" style="word-break: break-all">Keepers go to ${esc(keepersDir)}</p>`;
+  const c = strip.children[cur]; if (c) c.scrollIntoView({block: "nearest", inline: "center"});
+}
+async function decide(decision) {
+  const it = view[cur]; if (!it) return;
+  const r = await fetch("/api/decide", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: it.id, decision})});
+  const d = await r.json();
+  if (d.error) { alert(d.error); return; }
+  it.decision = d.decision;
+  if (decision !== "undo" && filter === "all" && cur < view.length - 1) cur++;
+  applyFilter();
+}
+function move(n) { if (view.length) { cur = (cur + n + view.length) % view.length; render(); } }
+document.addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const key = e.key.toLowerCase();
+  if (key === "k") decide("keep");
+  else if (key === "j") decide("reject");
+  else if (key === "u") decide("undo");
+  else if (key === "f" && view[cur]) window.open("/full/" + encodeURI(view[cur].id));
+  else if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); move(1); }
+  else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+});
+document.getElementById("strip").addEventListener("click", e => { const d = e.target.closest("[data-i]"); if (d) { cur = +d.dataset.i; render(); } });
+document.getElementById("info").addEventListener("click", e => { const b = e.target.closest("[data-d]"); if (b) decide(b.dataset.d); });
+document.getElementById("filters").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  filter = b.dataset.f; document.querySelectorAll("#filters button").forEach(x => x.classList.toggle("on", x === b)); applyFilter();
+});
+load();
+</script>
+</body>
+</html>
